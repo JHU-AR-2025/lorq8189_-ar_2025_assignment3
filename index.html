@@ -63,190 +63,175 @@
         var scene = null;
         var sceneToRender = null;
         var createDefaultEngine = function() { return new BABYLON.Engine(canvas, true, { preserveDrawingBuffer: true, stencil: true,  disableWebGL2Support: false}); };
-        /**
-         * WebXR ar demo using hit-test, anchors, and depth sensing
-         * 
-         * Every press on the screen will add a figure in the requested position (if the ring is displayed). Those meshes will be kept in place by the AR system you are using.
-         * 
-         * Working on android devices and the latest chrome browser, or the oculus quest 3.
-         * 
-         * Created by Raanan Weber (@RaananW)
-         */
+        var createScene = function () {
+    // Base scene (as given)
+    var scene = new BABYLON.Scene(engine);
+
+    var ground = BABYLON.MeshBuilder.CreateGround("ground", { width: 6, height: 6 }, scene);
+    ground.isVisible = false;
+
+    var camera = new BABYLON.FreeCamera("camera1", new BABYLON.Vector3(0, 5, -10), scene);
+    camera.setTarget(BABYLON.Vector3.Zero());
+    camera.attachControl(canvas, true);
+
+    var sphere = BABYLON.MeshBuilder.CreateSphere("sphere", { diameter: 2, segments: 32 }, scene);
+    sphere.position.y = 1;
+    sphere.position.x = 1;
+
+    var cylinder = BABYLON.MeshBuilder.CreateCylinder("cylinder", {height: 2, diameter: 1}, scene);
+    cylinder.position.y = 1;
+    cylinder.position.x = -1;
+    
+
+    // Vertex Shader
+    BABYLON.Effect.ShadersStore["customVertexShader"] = `
+    precision highp float;
+
+    /*
+    Vertex shader for Phong-style lighting
+    - Takes OBJECT-space attributes
+    - Produces WORLD-space position/normal for lighting
+    - Produces CLIP-space position for rasterization
+    */
+
+
+    // INPUTS (attributes: OBJECT space)
+    attribute vec3 position;  // vertex position
+    attribute vec3 normal;    // vertex normal
+
+    // INPUTS (uniforms)
+    uniform mat4 world;                // object -> world
+    uniform mat4 worldViewProjection;  // object -> clip (projection * view * world)
+
+    // OUTPUTS (varyings: WORLD space)
+    varying vec3 vPosW;     // world-space position
+    varying vec3 vNormalW;  // world-space normal
+
+    void main() {
+        // World-space position
+        vec4 pw = world * vec4(position, 1.0);
+        vPosW = pw.xyz;
+
+        // World-space normal
+        vNormalW = normalize(mat3(world) * normal);
+
+        // Clip-space position
+        gl_Position = worldViewProjection * vec4(position, 1.0);
+    }`;
+
+
+    // FRAGMENT SHADER: COMPLETE THE MISSING CODE HERE
+    BABYLON.Effect.ShadersStore["customFragmentShader"] = `
+    precision highp float;
+
+    // INPUTS:
+    // Interpolated per-fragment data coming from the vertex shader
+    varying vec3 vPosW;        // World-space position of the current fragment
+    varying vec3 vNormalW;     // World-space geometric normal
+
+    // Material parameters
+    uniform float uMatAmbient;   // Scalar ambient factor in [0, 1]
+    uniform vec3  uMatDiffuse;   // Diffuse color (RGB)
+    uniform vec3  uMatSpecular;  // Specular color (RGB)
+    uniform float uMatShininess; // Phong exponent. higher = tighter specular highlight (e.g., 16, 32, 64)
+
+    // Camera
+    uniform vec3 uCameraPos;     // Camera position in world space used to form view vector V
+
+    // Point light (emits from a position, with distance falloff)
+    uniform vec3 uPointLightColor; // Linear RGB intensity/color of the point light
+    uniform vec3 uPointLightPos;   // World-space position of the point light
+
+    
+    vec3 shadePointLight(
+        vec3 lColor, vec3 lPos, vec3 N, vec3 V, vec3 kd, vec3 ks, float shin)
+    {
+        /*
+        Inputs:
+            lColor : light color/intensity (RGB)
+            lPos   : light position in world space
+            N, V   : unit normal and view vectors (world space)
+            kd, ks : material colors
+            shin   : Phong exponent
+        Returns:
+            RGB contribution from this point light, with distance attenuation
+        */
+        vec3 L = normalize(lPos - vPosW);
+        vec3 R = normalize(reflect(-L, N));
         
-        var createScene = async function () {
+        vec3 color = lColor*kd*dot(N, L) + lColor*ks*pow(max(dot(R, V), 0.0), shin);
         
-            // This creates a basic Babylon Scene object (non-mesh)
-            var scene = new BABYLON.Scene(engine);
+
+    
+        return color; // Dummy return value. Please change this
+    }
+
+    void main()
+    {
+        // Ensure unit-length vectors
+        // vNormalW was linearly interpolated across the triangle, so renormalizing is required.
+        vec3 N = normalize(vNormalW);
+
+        // View vector points from the surface toward the camera in world space
+        vec3 V = normalize(uCameraPos - vPosW);
+
+        // Start with a simple constant ambient term (not physically based, but easy to understand)
+        // Using material diffuse color for the ambient tint is a common convention in basic Phong
+        vec3 color = uMatAmbient * uMatDiffuse;
+
+        // Add point light contribution
+        color += shadePointLight(
+            uPointLightColor,
+            uPointLightPos,
+            N, V,
+            uMatDiffuse, uMatSpecular, uMatShininess
+        );
         
-            // This creates and positions a free camera (non-mesh)
-            var camera = new BABYLON.FreeCamera("camera1", new BABYLON.Vector3(0, 1, -5), scene);
-        
-            // This targets the camera to scene origin
-            camera.setTarget(BABYLON.Vector3.Zero());
-        
-            // This attaches the camera to the canvas
-            camera.attachControl(canvas, true);
-        
-            // AR availability check and GUI in non-AR mode
-            const arAvailable = await BABYLON.WebXRSessionManager.IsSessionSupportedAsync('immersive-ar');
-        
-            const advancedTexture = BABYLON.GUI.AdvancedDynamicTexture.CreateFullscreenUI(
-                "FullscreenUI"
-            );
-        
-            const rectangle = new BABYLON.GUI.Rectangle("rect");
-            rectangle.background = "black";
-            rectangle.color = "blue";
-            rectangle.width = "80%";
-            rectangle.height = "50%";
-        
-            advancedTexture.addControl(rectangle);
-            const nonXRPanel = new BABYLON.GUI.StackPanel();
-            rectangle.addControl(nonXRPanel);
-        
-            const text1 = new BABYLON.GUI.TextBlock("text1");
-            text1.fontFamily = "Helvetica";
-            text1.textWrapping = true;
-            text1.color = "white";
-            text1.fontSize = "14px";
-            text1.height = "400px"
-            text1.paddingLeft = "10px";
-            text1.paddingRight = "10px";
-         
-            if (!arAvailable) {
-                text1.text = "AR is not available in your system. Please make sure you use a supported device such as a Meta Quest 3 or a modern Android device and a supported browser like Chrome.\n \n Make sure you have Google AR services installed and that you enabled the WebXR incubation flag under chrome://flags";
-                nonXRPanel.addControl(text1);
-                return scene;
-            } else {
-                text1.text = "WebXR Demo: Hit test and depth sensing.\n \n Please enter AR with the button on the lower right corner to start. Once in AR, look at the floor for a few seconds (and move a little): the hit-testing ring will appear. Then click anywhere on the screen to place a model in your space.";
-                nonXRPanel.addControl(text1);
-            }
-        
-            // This creates a light, aiming 0,1,0 - to the sky (non-mesh)
-            var light = new BABYLON.HemisphericLight("light", new BABYLON.Vector3(0, 1, 0), scene);
-        
-            // Default intensity is 1. Let's dim the light a small amount
-            light.intensity = 0.7;
-        
-            var dirLight = new BABYLON.DirectionalLight('light', new BABYLON.Vector3(0, -1, -0.5), scene);
-            dirLight.position = new BABYLON.Vector3(0, 5, -5);
-        
-            var shadowGenerator = new BABYLON.ShadowGenerator(1024, dirLight);
-            shadowGenerator.useBlurExponentialShadowMap = true;
-            shadowGenerator.blurKernel = 32;
-        
-            const model = await BABYLON.ImportMeshAsync("./scenes/dummy3.babylon", scene);
-        
-            const xr = await scene.createDefaultXRExperienceAsync({
-                uiOptions: {
-                    sessionMode: 'immersive-ar'
-                },
-                inputOptions: {
-                    doNotLoadControllerMeshes: true
-                },
-                handSupportOptions: {
-                    handMeshes: {
-                        disableDefaultMeshes: true,
-                    },
-                    jointMeshes: {
-                        keepOriginalVisible: false,
-                        invisible: true
-                    }
-                }
-            });
-        
-            //Hide GUI in AR mode
-            xr.baseExperience.sessionManager.onXRSessionInit.add(() => {
-                rectangle.isVisible = false;
-            })
-            xr.baseExperience.sessionManager.onXRSessionEnded.add(() => {
-                rectangle.isVisible = true;
-        
-            })
-        
-            // Enable the depth sensing module to hide the added models behind real-world objects
-            xr.baseExperience.featuresManager.enableFeature(
-                BABYLON.WebXRFeatureName.DEPTH_SENSING,
-                "latest",
-                {
-                    dataFormatPreference: ["ushort", "float"],
-                    usagePreference: ["cpu", "gpu"],
-                },
-            );
-        
-            const fm = xr.baseExperience.featuresManager;
-        
-            const xrTest = fm.enableFeature(BABYLON.WebXRHitTest.Name, "latest");
-            const anchors = fm.enableFeature(BABYLON.WebXRAnchorSystem.Name, 'latest');
-        
-            fm.enableFeature(BABYLON.WebXRBackgroundRemover.Name);
-        
-            let b = model.meshes[0];
-            b.rotationQuaternion = new BABYLON.Quaternion();
-            shadowGenerator.addShadowCaster(b, true);
-        
-            const marker = BABYLON.MeshBuilder.CreateTorus('marker', { diameter: 0.15, thickness: 0.05 });
-            marker.isVisible = false;
-            marker.rotationQuaternion = new BABYLON.Quaternion();
-        
-            var skeleton = model.skeletons[0];
-        
-            // ROBOT
-            skeleton.animationPropertiesOverride = new BABYLON.AnimationPropertiesOverride();
-            skeleton.animationPropertiesOverride.enableBlending = true;
-            skeleton.animationPropertiesOverride.blendingSpeed = 0.05;
-            skeleton.animationPropertiesOverride.loopMode = 1;
-        
-            var idleRange = skeleton.getAnimationRange("YBot_Idle");
-            scene.beginAnimation(skeleton, idleRange.from, idleRange.to, true);
-        
-            let hitTest;
-        
-            b.isVisible = false;
-        
-            xrTest.onHitTestResultObservable.add((results) => {
-                if (results.length) {
-                    marker.isVisible = true;
-                    hitTest = results[0];
-                    hitTest.transformationMatrix.decompose(undefined, b.rotationQuaternion, b.position);
-                    hitTest.transformationMatrix.decompose(undefined, marker.rotationQuaternion, marker.position);
-                } else {
-                    marker.isVisible = false;
-                    hitTest = undefined;
-                }
-            });
-            const mat1 = new BABYLON.StandardMaterial('1', scene);
-            mat1.diffuseColor = BABYLON.Color3.Red();
-            const mat2 = new BABYLON.StandardMaterial('1', scene);
-            mat2.diffuseColor = BABYLON.Color3.Blue();
-        
-            if (anchors) {
-                anchors.onAnchorAddedObservable.add(anchor => {
-                    b.isVisible = true;
-                    anchor.attachedNode = b.clone("mensch");
-                    anchor.attachedNode.skeleton = skeleton.clone('skelet');
-                    shadowGenerator.addShadowCaster(anchor.attachedNode, true);
-                    scene.beginAnimation(anchor.attachedNode.skeleton, idleRange.from, idleRange.to, true);
-                    b.isVisible = false;
-                })
-        
-                anchors.onAnchorRemovedObservable.add(anchor => {
-                    if (anchor) {
-                        anchor.attachedNode.isVisible = false;
-                        anchor.attachedNode.dispose();
-                    }
-                });
-            }
-        
-            scene.onPointerDown = () => {
-                if (hitTest && anchors && xr.baseExperience.state === BABYLON.WebXRState.IN_XR) {
-                    anchors.addAnchorPointUsingHitTestResultAsync(hitTest);
-                }
-            }
-        
-            return scene;
-        
-        };
+        color += shadePointLight(
+            uPointLightColor*.6,
+            uPointLightPos*-1.0,
+            N, V,
+            uMatDiffuse*1.5, uMatSpecular*1.1, 4.0
+        );
+
+        // Final fragment color
+        gl_FragColor = vec4(color, 1.0);
+    }`;
+
+    // uMatAmbient uMatDiffuse uMatSpecular uMatShininess uPointLightColor uPointLightPos     
+    var shaderMat = new BABYLON.ShaderMaterial("custom", scene, "custom", {
+        attributes: ["position", "normal"],
+        uniforms: [
+            "world", "worldViewProjection",
+            "uCameraPos",
+            "uMatAmbient", "uMatDiffuse", "uMatSpecular", "uMatShininess",
+            "uPointLightColor", "uPointLightPos"
+        ]
+    });
+
+
+    // ADJUST LIGHT AND MATERIAL PROPERTIES HERE
+    // Material
+    shaderMat.setFloat("uMatAmbient", .45)
+    shaderMat.setColor3("uMatDiffuse",  new BABYLON.Color3(0.35, .48, 1));
+    shaderMat.setColor3("uMatSpecular", new BABYLON.Color3(1, 0, .8));
+    shaderMat.setFloat("uMatShininess", 8.0);
+
+    // Point Light
+    shaderMat.setColor3("uPointLightColor", new BABYLON.Color3(1,1,1));
+    shaderMat.setVector3("uPointLightPos", new BABYLON.Vector3(2.0,3.5,3.0));
+
+    // Update camera position every frame
+    scene.onBeforeRenderObservable.add(function () {
+        shaderMat.setVector3("uCameraPos", camera.position);
+    });
+
+    sphere.material = shaderMat;
+    cylinder.material = shaderMat;
+
+    return scene;
+};
+
                 window.initFunction = async function() {
                     
                     
@@ -269,8 +254,7 @@
         if (!engine) throw 'engine should not be null.';
         startRenderLoop(engine, canvas);
         window.scene = createScene();};
-        initFunction().then(() => {scene.then(returnedScene => { sceneToRender = returnedScene; });
-        
+        initFunction().then(() => {sceneToRender = scene
                     });
 
                     // Resize
